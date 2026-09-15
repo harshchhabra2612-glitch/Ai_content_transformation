@@ -1,0 +1,73 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.secret.local
+*.pem
+*.key
+*.p12
+*.pfx
+*service-account*.json
+serviceAccountKey.json
+google-services.json
+GoogleService-Info.plist
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Python & Virtual Environments
+venv/
+.venv/
+**/venv/
+**/.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node & Build Outputs
+node_modules/
+**/node_modules/
+functions/lib
+dist/
+dist-ssr/
+build/
+
+# Runtime Data, Storage & Local DBs
+chroma_db/
+**/chroma_db/
+storage/
+**/storage/
+uploads/
+**/uploads/
+*.sqlite3
+*.db
+scratch/
+
+# Archives & Temporary Artifacts
+*.zip
+*.tar.gz
+*.tgz
+SIH-PROJECT/
+
+# System & IDE files
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+.gemini/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

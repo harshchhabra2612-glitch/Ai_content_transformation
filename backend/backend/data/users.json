@@ -1,0 +1,79 @@
+{
+  "uid-viewer": {
+    "user_id": "uid-viewer",
+    "email": "viewer@era.gov.in",
+    "display_name": "Viewer User",
+    "role": "VIEWER",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:36:55.233543+00:00",
+    "updated_at": "2026-09-14T04:36:55.234059+00:00",
+    "status": "active"
+  },
+  "uid-analyst": {
+    "user_id": "uid-analyst",
+    "email": "analyst@era.gov.in",
+    "display_name": "Analyst User",
+    "role": "ANALYST",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:36:55.242693+00:00",
+    "updated_at": "2026-09-14T08:31:07.788846+00:00",
+    "status": "active"
+  },
+  "uid-user-b": {
+    "user_id": "uid-user-b",
+    "email": "user_b@era.gov.in",
+    "display_name": "User B",
+    "role": "OFFICER",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:36:58.059652+00:00",
+    "updated_at": "2026-09-14T04:36:58.059652+00:00",
+    "status": "active"
+  },
+  "uid-user-a": {
+    "user_id": "uid-user-a",
+    "email": "user_a@era.gov.in",
+    "display_name": "User A",
+    "role": "OFFICER",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:36:58.076653+00:00",
+    "updated_at": "2026-09-14T04:36:58.076653+00:00",
+    "status": "active"
+  },
+  "uid-officer": {
+    "user_id": "uid-officer",
+    "email": "officer@era.gov.in",
+    "display_name": "Officer User",
+    "role": "OFFICER",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:36:58.082138+00:00",
+    "updated_at": "2026-09-14T04:36:58.082138+00:00",
+    "status": "active"
+  },
+  "uid-admin": {
+    "user_id": "uid-admin",
+    "email": "admin@era.gov.in",
+    "display_name": "Admin User",
+    "role": "ADMIN",
+    "mfa_enabled": true,
+    "mfa_verified": true,
+    "created_at": "2026-09-14T04:36:58.140457+00:00",
+    "updated_at": "2026-09-14T04:36:58.140627+00:00",
+    "status": "active"
+  },
+  "SqqX9iLgddaf24CVHnVrWBntg4x2": {
+    "user_id": "SqqX9iLgddaf24CVHnVrWBntg4x2",
+    "email": "harsh.chhabra2612@gmail.com",
+    "display_name": "Harsh Chhabra",
+    "role": "OFFICER",
+    "mfa_enabled": false,
+    "mfa_verified": false,
+    "created_at": "2026-09-14T04:42:23.008197+00:00",
+    "updated_at": "2026-09-14T04:42:23.008197+00:00",
+    "status": "active"
+  }
+}

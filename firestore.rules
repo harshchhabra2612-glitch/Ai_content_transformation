@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // OTP records are strictly accessible via server-side Firebase Cloud Functions only
+    match /otps/{document=**} {
+      allow read, write: if false;
+    }
+
+    // User files and nested subcollections
+    match /users/{userId}/files/{fileId} {
+      // Owner can read and write all their files
+      // Shared users can read if their UID/email is in sharedWith list
+      allow read: if isOwner(userId) || (isAuthenticated() && resource.data.sharedWith != null && request.auth.token.email in resource.data.sharedWithEmails);
+      allow create, update, delete: if isOwner(userId) || (isAuthenticated() && resource.data.sharedWith != null && request.auth.token.email in resource.data.editorEmails);
+
+      // Outputs subcollection
+      match /outputs/{outputId} {
+        allow read: if isOwner(userId) || isAuthenticated();
+        allow write: if isOwner(userId) || isAuthenticated();
+      }
+
+      // Activity subcollection
+      match /activity/{activityId} {
+        allow read: if isOwner(userId) || isAuthenticated();
+        allow write: if isAuthenticated();
+      }
+
+      // Shares subcollection
+      match /shares/{shareId} {
+        allow read: if isOwner(userId) || isAuthenticated();
+        allow write: if isOwner(userId);
+      }
+    }
+
+    // Global shares collection for fast index queries
+    match /shares/{shareId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAuthenticated();
+    }
+  }
+}
+
