@@ -25,17 +25,19 @@ MFA_REQUIRED_OPERATIONS: Set[str] = {
 }
 
 # File Upload Security Settings
-MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "15"))
+MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "300"))
 MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 
-ALLOWED_EXTENSIONS: Set[str] = {".pdf", ".docx", ".pptx", ".xlsx", ".txt"}
-ALLOWED_MIME_TYPES: Set[str] = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "text/plain",
-}
+try:
+    from backend.security.file_registry import ALLOWED_EXTENSIONS as REG_ALLOWED_EXTS, ALLOWED_MIME_TYPES as REG_MIME_TYPES
+except ImportError:
+    from security.file_registry import ALLOWED_EXTENSIONS as REG_ALLOWED_EXTS, ALLOWED_MIME_TYPES as REG_MIME_TYPES
+
+ALLOWED_EXTENSIONS: Set[str] = REG_ALLOWED_EXTS
+ALLOWED_MIME_TYPES: Set[str] = set()
+for mime_set in REG_MIME_TYPES.values():
+    ALLOWED_MIME_TYPES.update(mime_set)
 
 # Rate Limiting Settings
 RATE_LIMIT_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+

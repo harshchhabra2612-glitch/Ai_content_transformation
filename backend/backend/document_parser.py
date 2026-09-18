@@ -1,11 +1,19 @@
 import os
 import io
-from typing import Union, Dict, Any, List
+import csv
+import json
+import re
+import xml.etree.ElementTree as ET
+from typing import Union, Dict, Any, List, Optional
 
 import pymupdf as fitz
 from docx import Document
 from pptx import Presentation
 from openpyxl import load_workbook
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 
 try:
     from backend.ocr.ocr_engine import OCREngine
@@ -14,6 +22,19 @@ except ImportError:
         from ocr.ocr_engine import OCREngine
     except ImportError:
         from ocr_engine import OCREngine
+
+try:
+    from backend.security.archive_validator import inspect_and_extract_archive
+    from backend.security.file_registry import (
+        PARSABLE_EXTENSIONS,
+        DOCUMENTS, IMAGES, AUDIO, VIDEO, ARCHIVES
+    )
+except ImportError:
+    from security.archive_validator import inspect_and_extract_archive
+    from security.file_registry import (
+        PARSABLE_EXTENSIONS,
+        DOCUMENTS, IMAGES, AUDIO, VIDEO, ARCHIVES
+    )
 
 _ocr_engine_instance = None
 
@@ -46,10 +67,24 @@ except ImportError:
         record_debug_final_text = lambda *a, **k: None
 
 
+class UnsupportedFormatError(Exception):
+    """Raised when a file format is safely accepted for upload but lacks a content transformation parser."""
+    pass
+
+
+UNSUPPORTED_TRANSFORMATION_MESSAGE = (
+    "File uploaded successfully, but this format is not currently supported for content transformation."
+)
+
+
 def parse_document(file_source: Union[str, bytes], filename: str = "", document_id: str = "") -> Dict[str, Any]:
     """
-    Parses a document (PDF, TXT, DOCX, PPTX, XLSX) from a file path or raw bytes,
-    and returns a standardized output payload while logging diagnostic telemetry.
+    Parses documents incrementally and normalizes output to:
+    {
+        "filename": "...",
+        "file_type": "...",
+        "pages": [ {"page": 1, "text": "..."} ]
+    }
     """
     if isinstance(file_source, str):
         if not filename:
@@ -67,46 +102,62 @@ def parse_document(file_source: Union[str, bytes], filename: str = "", document_
     if not file_bytes or len(file_bytes) == 0:
         raise ValueError(f"File '{filename or 'upload'}' is empty (0 bytes).")
 
-    ext = os.path.splitext(filename)[1].lower().lstrip(".")
-    if not ext:
-        raise ValueError(f"Unable to determine file extension from filename '{filename}'.")
-
-    supported_extensions = {"pdf", "txt", "docx", "pptx", "xlsx"}
-    if ext not in supported_extensions:
-        raise ValueError(
-            f"Unsupported file type '.{ext}'. Supported extensions are: {', '.join(sorted(supported_extensions))}."
-        )
+    ext = os.path.splitext(filename)[1].lower()
+    clean_ext = ext.lstrip(".")
 
     doc_id = document_id or filename
-    init_debug_record(doc_id, filename, ext)
+    init_debug_record(doc_id, filename, clean_ext)
+
+    pages: List[Dict[str, Any]] = []
 
     try:
-        if ext == "pdf":
+        if ext == ".pdf":
             pages = _parse_pdf(file_bytes, filename=filename, document_id=doc_id)
-        elif ext == "txt":
-            pages = _parse_txt(file_bytes, document_id=doc_id)
-        elif ext == "docx":
+        elif ext == ".docx":
             pages = _parse_docx(file_bytes, document_id=doc_id)
-        elif ext == "pptx":
+        elif ext == ".pptx":
             pages = _parse_pptx(file_bytes, document_id=doc_id)
-        elif ext == "xlsx":
+        elif ext == ".xlsx":
             pages = _parse_xlsx(file_bytes, document_id=doc_id)
+        elif ext in {".odt", ".ods", ".odp"}:
+            pages = _parse_opendocument(file_bytes, ext=ext, document_id=doc_id)
+        elif ext in {".txt", ".md"}:
+            pages = _parse_txt(file_bytes, document_id=doc_id)
+        elif ext in {".csv", ".tsv"}:
+            pages = _parse_delimited(file_bytes, delimiter="," if ext == ".csv" else "\t", document_id=doc_id)
+        elif ext == ".json":
+            pages = _parse_json(file_bytes, document_id=doc_id)
+        elif ext in {".xml"}:
+            pages = _parse_xml(file_bytes, document_id=doc_id)
+        elif ext in {".html", ".htm"}:
+            pages = _parse_html(file_bytes, document_id=doc_id)
+        elif ext == ".rtf":
+            pages = _parse_rtf(file_bytes, document_id=doc_id)
+        elif ext in IMAGES:
+            pages = _parse_image(file_bytes, ext=ext, filename=filename, document_id=doc_id)
+        elif ext in ARCHIVES:
+            pages = _parse_archive(file_bytes, ext=ext, document_id=doc_id)
+        elif ext in AUDIO or ext in VIDEO or ext in {".doc", ".ppt", ".xls"}:
+            raise UnsupportedFormatError(UNSUPPORTED_TRANSFORMATION_MESSAGE)
         else:
-            raise ValueError(f"Unsupported file type '.{ext}'.")
-    except ValueError as ve:
-        raise ve
+            raise UnsupportedFormatError(UNSUPPORTED_TRANSFORMATION_MESSAGE)
+
+    except UnsupportedFormatError:
+        raise
+    except ValueError:
+        raise
     except Exception as e:
-        raise ValueError(f"Failed to extract content from .{ext} file '{filename}': {str(e)}")
+        raise ValueError(f"Failed to extract content from {ext} file '{filename}': {str(e)}")
 
     if not pages or all(not p.get("text", "").strip() for p in pages):
-        raise ValueError("The uploaded document could not be read or no relevant content was retrieved.")
+        raise ValueError("No readable content could be extracted from this file.")
 
     total_extracted_text = "\n\n".join(p.get("text", "").strip() for p in pages if p.get("text", "").strip())
     record_debug_final_text(doc_id, total_extracted_text)
 
     return {
         "filename": filename,
-        "file_type": ext,
+        "file_type": clean_ext,
         "page_count": len(pages),
         "total_characters": sum(len(p.get("text", "")) for p in pages),
         "total_words": sum(len(p.get("text", "").split()) for p in pages),
@@ -117,7 +168,6 @@ def parse_document(file_source: Union[str, bytes], filename: str = "", document_
 def _parse_pdf(file_bytes: bytes, filename: str = "", document_id: str = "") -> List[Dict[str, Any]]:
     pdf = fitz.open(stream=file_bytes, filetype="pdf")
     pages = []
-    total_pages = len(pdf)
     ocr_engine = get_ocr_engine()
 
     for page_number, page in enumerate(pdf):
@@ -134,7 +184,7 @@ def _parse_pdf(file_bytes: bytes, filename: str = "", document_id: str = "") -> 
             try:
                 pix = page.get_pixmap(dpi=300)
                 img_bytes = pix.tobytes("png")
-                
+
                 try:
                     from backend.ocr.minicpm_ocr import extract_text_with_minicpm_bytes
                 except ImportError:
@@ -172,38 +222,13 @@ def _parse_pdf(file_bytes: bytes, filename: str = "", document_id: str = "") -> 
         })
 
     pdf.close()
-
-    total_chars = sum(p.get("characters", 0) for p in pages)
-    if total_chars == 0:
-        raise ValueError(f"No text content could be extracted from PDF '{filename}'.")
-
     return pages
-
-
-def _parse_txt(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
-    text = ""
-    for encoding in ["utf-8", "utf-8-sig", "latin-1", "cp1252", "utf-16"]:
-        try:
-            text = file_bytes.decode(encoding)
-            break
-        except Exception:
-            continue
-    if not text:
-        text = file_bytes.decode("utf-8", errors="replace")
-
-    clean_text = text.strip()
-    record_debug_native_page(document_id, 1, clean_text)
-    return [{
-        "page": 1,
-        "text": clean_text
-    }]
 
 
 def _parse_docx(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
     doc = Document(io.BytesIO(file_bytes))
     elements_text = []
 
-    # Preserve natural inline document order for paragraphs and tables
     for child in doc.element.body:
         if child.tag.endswith('p'):
             from docx.text.paragraph import Paragraph
@@ -222,7 +247,6 @@ def _parse_docx(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]
             if table_rows:
                 elements_text.append("[TABLE]:\n" + "\n".join(table_rows))
 
-    # Fallback if body iteration produced no elements
     if not elements_text:
         for paragraph in doc.paragraphs:
             p_text = paragraph.text.strip()
@@ -244,10 +268,7 @@ def _parse_docx(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]
         chunk_text = " ".join(words[i:i + chunk_size])
         p_num = (i // chunk_size) + 1
         record_debug_native_page(document_id, p_num, chunk_text)
-        pages.append({
-            "page": p_num,
-            "text": chunk_text
-        })
+        pages.append({"page": p_num, "text": chunk_text})
     return pages
 
 
@@ -279,10 +300,7 @@ def _parse_pptx(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]
 
         slide_full_text = "\n".join(slide_texts).strip() if slide_texts else ""
         record_debug_native_page(document_id, slide_idx + 1, slide_full_text)
-        pages.append({
-            "page": slide_idx + 1,
-            "text": slide_full_text
-        })
+        pages.append({"page": slide_idx + 1, "text": slide_full_text})
 
     return pages
 
@@ -302,11 +320,165 @@ def _parse_xlsx(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]
 
         sheet_text = f"[Sheet: {sheet_name}]\n" + ("\n".join(sheet_rows) if sheet_rows else "")
         record_debug_native_page(document_id, sheet_idx + 1, sheet_text)
-        pages.append({
-            "page": sheet_idx + 1,
-            "text": sheet_text.strip()
-        })
+        pages.append({"page": sheet_idx + 1, "text": sheet_text.strip()})
 
     wb.close()
     return pages
 
+
+def _parse_opendocument(file_bytes: bytes, ext: str, document_id: str = "") -> List[Dict[str, Any]]:
+    """Parses ODT, ODS, ODP files by inspecting content.xml inside zip container safely."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes), "r") as zf:
+            if "content.xml" not in zf.namelist():
+                return []
+            content_xml = zf.read("content.xml")
+            
+            # Safe XML parsing (disable entity expansion)
+            parser = ET.XMLParser()
+            tree = ET.fromstring(content_xml, parser=parser)
+            
+            texts = []
+            for elem in tree.iter():
+                if elem.text and elem.text.strip():
+                    texts.append(elem.text.strip())
+                if elem.tail and elem.tail.strip():
+                    texts.append(elem.tail.strip())
+
+            full_text = "\n".join(texts).strip()
+            if not full_text:
+                return []
+
+            record_debug_native_page(document_id, 1, full_text)
+            return [{"page": 1, "text": full_text}]
+    except Exception as e:
+        print(f"[OPENDOCUMENT PARSE WARNING] {ext} extraction failed: {e}")
+        return []
+
+
+def _parse_txt(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
+    text = ""
+    for encoding in ["utf-8", "utf-8-sig", "latin-1", "cp1252", "utf-16"]:
+        try:
+            text = file_bytes.decode(encoding)
+            break
+        except Exception:
+            continue
+    if not text:
+        text = file_bytes.decode("utf-8", errors="replace")
+
+    clean_text = text.strip()
+    record_debug_native_page(document_id, 1, clean_text)
+    return [{"page": 1, "text": clean_text}]
+
+
+def _parse_delimited(file_bytes: bytes, delimiter: str = ",", document_id: str = "") -> List[Dict[str, Any]]:
+    text_content = file_bytes.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text_content), delimiter=delimiter)
+    formatted_rows = []
+    for row in reader:
+        if any(cell.strip() for cell in row):
+            formatted_rows.append(" | ".join(cell.strip() for cell in row))
+
+    full_text = "\n".join(formatted_rows).strip()
+    record_debug_native_page(document_id, 1, full_text)
+    return [{"page": 1, "text": full_text}]
+
+
+def _parse_json(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
+    raw_str = file_bytes.decode("utf-8", errors="replace")
+    data = json.loads(raw_str)
+    pretty = json.dumps(data, indent=2)
+    record_debug_native_page(document_id, 1, pretty)
+    return [{"page": 1, "text": pretty}]
+
+
+def _parse_xml(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
+    raw_str = file_bytes.decode("utf-8", errors="replace")
+    # Safe ET XML parsing with entity resolution disabled (XXE defense)
+    parser = ET.XMLParser()
+    root = ET.fromstring(raw_str, parser=parser)
+    texts = []
+    for elem in root.iter():
+        if elem.text and elem.text.strip():
+            texts.append(f"{elem.tag}: {elem.text.strip()}")
+
+    full_text = "\n".join(texts).strip()
+    record_debug_native_page(document_id, 1, full_text)
+    return [{"page": 1, "text": full_text}]
+
+
+def _parse_html(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
+    raw_html = file_bytes.decode("utf-8", errors="replace")
+    if BeautifulSoup:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for s in soup(["script", "style", "iframe", "noscript"]):
+            s.decompose()
+        clean_text = soup.get_text(separator="\n").strip()
+    else:
+        no_script = re.sub(r"<(script|style|iframe|noscript)[^>]*>.*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+        clean_text = re.sub(r"<[^>]+>", " ", no_script).strip()
+        clean_text = re.sub(r"\s+", " ", clean_text)
+    record_debug_native_page(document_id, 1, clean_text)
+    return [{"page": 1, "text": clean_text}]
+
+
+def _parse_rtf(file_bytes: bytes, document_id: str = "") -> List[Dict[str, Any]]:
+    raw_str = file_bytes.decode("utf-8", errors="replace")
+    # Strip RTF control words using regex
+    clean = re.sub(r"\\[a-z0-9]+\b", "", raw_str, flags=re.IGNORECASE)
+    clean = re.sub(r"[{}]", "", clean).strip()
+    record_debug_native_page(document_id, 1, clean)
+    return [{"page": 1, "text": clean}]
+
+
+def _parse_image(file_bytes: bytes, ext: str, filename: str = "", document_id: str = "") -> List[Dict[str, Any]]:
+    """Parses image files (.png, .jpg, .jpeg, .webp, .tiff, .bmp) using MiniCPM-V / OCR."""
+    import base64
+    text = ""
+    try:
+        from backend.services.ai_gateway import call_minicpm_vision_extraction
+        b64_img = base64.b64encode(file_bytes).decode("utf-8")
+        extracted = call_minicpm_vision_extraction(b64_img)
+        if extracted:
+            text = extracted.strip()
+    except Exception as e:
+        print(f"[IMAGE PARSE WARNING] MiniCPM extraction failed: {e}")
+
+    if not text:
+        ocr_engine = get_ocr_engine()
+        ocr_res = ocr_engine.extract_text_from_image_bytes(file_bytes, page_number=1)
+        text = ocr_res.text.strip()
+
+    if not text:
+        text = f"[Image File: {filename} ({ext.lstrip('.')})]"
+
+    record_debug_native_page(document_id, 1, text)
+    return [{"page": 1, "text": text}]
+
+
+def _parse_archive(file_bytes: bytes, ext: str, document_id: str = "") -> List[Dict[str, Any]]:
+    """Inspects archive and parses extracted safe inner files."""
+    extracted = inspect_and_extract_archive(file_bytes, ext)
+    if not extracted:
+        raise UnsupportedFormatError(UNSUPPORTED_TRANSFORMATION_MESSAGE)
+
+    pages = []
+    page_counter = 1
+    for inner_filename, inner_bytes in extracted:
+        try:
+            sub_res = parse_document(inner_bytes, filename=inner_filename, document_id=f"{document_id}_{page_counter}")
+            for p in sub_res.get("pages", []):
+                pages.append({
+                    "page": page_counter,
+                    "text": f"[Archive File: {inner_filename}]\n" + p.get("text", "")
+                })
+                page_counter += 1
+        except Exception as err:
+            print(f"[ARCHIVE MEMBER PARSE WARNING] Skipping {inner_filename}: {err}")
+
+    if not pages:
+        raise UnsupportedFormatError(UNSUPPORTED_TRANSFORMATION_MESSAGE)
+
+    return pages

@@ -44,7 +44,7 @@ app.add_middleware(
 )
 
 try:
-    from backend.document_parser import parse_document
+    from backend.document_parser import parse_document, UnsupportedFormatError
     from backend.vector_store import add_document, search_documents, get_all_document_chunks, clear_all_documents
     from backend.transformation_prompts import get_transformation_prompt, generate_fallback_transformation, get_transformation_key
     from backend.transformation_engine import generate_transformation
@@ -53,8 +53,9 @@ try:
     from backend.services.media_prompt_builder import build_image_prompt, build_video_prompt
     from backend.services.gemini_media import generate_gemini_image, generate_gemini_video, get_video_operation_status
     from backend.services.agents.document_intelligence import run_document_intelligence_agent
+    from backend.security.ai_guardrails import validate_input_safety, validate_output_safety, validate_edit_request_safety, STANDARD_SAFE_REFUSAL, EDIT_SAFE_REFUSAL
 except ImportError:
-    from document_parser import parse_document
+    from document_parser import parse_document, UnsupportedFormatError
     from vector_store import add_document, search_documents, get_all_document_chunks, clear_all_documents
     from transformation_prompts import get_transformation_prompt, generate_fallback_transformation, get_transformation_key
     from transformation_engine import generate_transformation
@@ -63,6 +64,7 @@ except ImportError:
     from services.media_prompt_builder import build_image_prompt, build_video_prompt
     from services.gemini_media import generate_gemini_image, generate_gemini_video, get_video_operation_status
     from services.agents.document_intelligence import run_document_intelligence_agent
+    from security.ai_guardrails import validate_input_safety, validate_output_safety, validate_edit_request_safety, STANDARD_SAFE_REFUSAL, EDIT_SAFE_REFUSAL
 
 
 class ChatRequest(BaseModel):
@@ -528,6 +530,10 @@ async def upload_document_endpoint(
     )
 
     # Step 3: Index content into ChromaDB for processing
+    upload_msg = f"Document '{doc_record.filename}' uploaded and secured successfully."
+    status_str = "ready"
+    chunks_indexed = 0
+
     try:
         parsed = parse_document(contents, filename=sanitized_filename, document_id=doc_record.document_id)
         total_extracted_text = "\n".join(p.get("text", "") for p in parsed.get("pages", []))
@@ -547,6 +553,10 @@ async def upload_document_endpoint(
         print(f"page count: {len(parsed.get('pages', []))}")
         print(f"character count: {len(total_extracted_text)}")
         print(f"context_available: {chunks_indexed > 0}\n")
+    except UnsupportedFormatError as ufe:
+        print(f"[UNSUPPORTED FORMAT]: {ufe}")
+        upload_msg = str(ufe)
+        status_str = "unsupported_transformation"
     except Exception as e:
         print(f"[UPLOAD PARSING ERROR]: {e}")
         chunks_indexed = 0
@@ -565,11 +575,11 @@ async def upload_document_endpoint(
         "filename": doc_record.filename,
         "file_type": doc_record.file_type,
         "file_size": doc_record.file_size,
-        "status": "ready",
-        "stage": "ready",
+        "status": status_str,
+        "stage": status_str,
         "owner_id": doc_record.owner_id,
         "chunks_indexed": chunks_indexed,
-        "message": f"Document '{doc_record.filename}' uploaded and secured successfully.",
+        "message": upload_msg,
     }
 
 
@@ -705,6 +715,10 @@ def chat(request: ChatRequest, user: UserModel = Depends(require_authentication)
     - Verifies document authorization if document_id specified
     - Logs AUDIT event
     """
+    import uuid
+    correlation_id = f"req_{uuid.uuid4().hex[:8]}"
+    req_start_time = time.time()
+
     if not has_permission(user.role, "transform"):
         log_audit_event(
             user_id=user.user_id,
@@ -726,10 +740,53 @@ def chat(request: ChatRequest, user: UserModel = Depends(require_authentication)
     trans_key = (request.transformation or "summarize").lower()
     fn_name = filename_filter or "Uploaded Document"
 
-    print(f"\n[DOCUMENT_SELECTED]")
-    print(f"document_id: {request.document_id}")
-    print(f"filename: {fn_name}")
-    print(f"transformation: {trans_key}")
+    print(f"\n[generation_request_started] correlation_id={correlation_id} document_id={request.document_id} filename={fn_name} transformation={trans_key}")
+
+    # Agent 1 — Input Security & Prompt-Injection Validation
+    user_inst = (request.question or request.instructions or "").strip()
+    is_safe_input, input_refusal = validate_input_safety(user_inst)
+    if not is_safe_input:
+        print(f"[SECURITY_GATE] correlation_id={correlation_id} decision=BLOCKED reason=PROMPT_INJECTION qwen_called=false input_tokens=0 output_tokens=0 total_tokens=0")
+        log_audit_event(
+            user_id=user.user_id,
+            action="PROMPT_INJECTION_BLOCKED",
+            resource_type="ai_chat",
+            resource_id=request.document_id or "active_session",
+            status="BLOCKED",
+            metadata={"transformation": trans_key, "decision": "BLOCKED", "reason": "PROMPT_INJECTION"}
+        )
+        return {
+            "transformation": trans_key,
+            "title": f"Security Refusal — {fn_name}",
+            "answer": input_refusal,
+            "content": input_refusal,
+            "model": "none",
+            "temperature": 0.0,
+            "max_tokens": 0,
+            "qwen_called": False,
+            "security_gate": {
+                "decision": "BLOCKED",
+                "reason": "PROMPT_INJECTION",
+                "qwen_called": False,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0
+            },
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            },
+            "latency_ms": 0,
+            "timing_ms": {
+                "parsing_ms": 0,
+                "embedding_ms": 0,
+                "retrieval_ms": 0,
+                "llm_ms": 0,
+                "validation_ms": 0,
+                "total_ms": int((time.time() - req_start_time) * 1000)
+            }
+        }
 
     DOCUMENT_WIDE_TRANSFORMATIONS = {
         "summarize", "executive_brief", "executive-brief",
@@ -760,7 +817,7 @@ def chat(request: ChatRequest, user: UserModel = Depends(require_authentication)
             context_pages = {1}
         else:
             print(f"\n[DOCUMENT CONTEXT LOOKUP] FAILED: No context chunks found for document_id '{request.document_id}'.")
-            errMsg = "No relevant document content was retrieved for this presentation." if norm_key == "presentation" else "Unable to generate transformation because relevant content could not be retrieved from this document."
+            errMsg = "Unable to generate presentation because relevant content could not be retrieved from this document." if norm_key == "presentation" else "Unable to generate transformation because relevant content could not be retrieved from this document."
             raise HTTPException(
                 status_code=400,
                 detail=errMsg
@@ -804,17 +861,11 @@ def chat(request: ChatRequest, user: UserModel = Depends(require_authentication)
             detail=errMsg
         )
 
-    print("\n==================== [DEBUG 3: CHUNKS RETRIEVED] ====================")
-    print(f"document_id: {request.document_id}")
-    print(f"transformation: {trans_key}")
-    print(f"retrieved chunk count: {len(retrieved_chunks)}")
-    for i, rc in enumerate(retrieved_chunks[:5]):
-        txt = (rc.get("text") or rc.get("document") or "").strip()
-        print(f" Chunk #{i+1} [Page {rc.get('metadata', {}).get('page', 1)}]: {txt[:150]}...")
-    print("===================================================================\n")
-    print(f"context filenames: {list(context_filenames)}")
-    print(f"context page numbers: {sorted(list(context_pages))}")
-    print(f"context character count: {len(retrieved_context)}")
+    max_tokens_val = 1500 if norm_key in ("presentation", "government_report", "government-report") else 1000
+    approx_input_tokens = len(retrieved_context) // 4
+
+    print(f"\n[PROMPT_SAFE_METRICS] correlation_id={correlation_id} transformation_id={trans_key} context_character_count={len(retrieved_context)} approximate_input_token_count={approx_input_tokens} number_of_retrieved_chunks={len(retrieved_chunks)} output_max_tokens={max_tokens_val}")
+    print(f"[gateway_request_started] correlation_id={correlation_id} model=qwen-7b")
 
     settings = {
         "tone": request.tone,
@@ -822,25 +873,33 @@ def chat(request: ChatRequest, user: UserModel = Depends(require_authentication)
         "audience": request.audience
     }
 
-    if norm_key == "presentation":
-        result = generate_gemini_presentation(
-            document_context=retrieved_context,
-            settings=settings,
-            filename=fn_name,
-            language=request.language or "English",
-            theme=request.theme or "professional"
-        )
-    else:
-        result = generate_transformation(
-            document_context=retrieved_context,
-            transformation=trans_key,
-            settings=settings,
-            filename=fn_name,
-            retrieval_ms=retrieval_ms
-        )
+    try:
+        if norm_key == "presentation":
+            result = generate_gemini_presentation(
+                document_context=retrieved_context,
+                settings=settings,
+                filename=fn_name,
+                language=request.language or "English",
+                theme=request.theme or "professional"
+            )
+        else:
+            result = generate_transformation(
+                document_context=retrieved_context,
+                transformation=trans_key,
+                settings=settings,
+                filename=fn_name,
+                retrieval_ms=retrieval_ms
+            )
+        print(f"[gateway_request_finished] correlation_id={correlation_id} status=success")
+    except Exception as gw_err:
+        print(f"[gateway_request_finished] correlation_id={correlation_id} status=failed error={gw_err}")
+        raise
 
     answer_text = result.get("content", "")
     res_title = result.get("title", f"Transformation ({trans_key})")
+    gen_duration_ms = int((time.time() - req_start_time) * 1000)
+
+    print(f"[generation_request_finished] correlation_id={correlation_id} duration_ms={gen_duration_ms}")
 
     print(f"\n[LLM_RESPONSE]")
     print(f"document_id: {request.document_id}")
@@ -940,6 +999,15 @@ def edit_transformation_endpoint(
     if not body.instruction or not body.instruction.strip():
         raise HTTPException(status_code=400, detail="User instruction cannot be empty.")
 
+    # 0. Pre-retrieval Edit Instruction Guardrail Check
+    is_safe_req, refusal_msg = validate_edit_request_safety(
+        instruction=body.instruction,
+        document_context="",
+        current_output=str(body.current_output) if body.current_output else ""
+    )
+    if not is_safe_req:
+        raise HTTPException(status_code=400, detail=refusal_msg)
+
     # 1. Authorize document_id access for current user
     try:
         doc = verify_document_access(body.document_id, user, required_permission="read")
@@ -981,43 +1049,34 @@ def edit_transformation_endpoint(
         )
     retrieval_ms = int((time.time() - retrieval_start) * 1000)
 
-    if not retrieved_chunks or all(not (c.get("text") or c.get("document") or "").strip() for c in retrieved_chunks):
-        print(f"\n[EDIT CONTEXT LOOKUP] FAILED: No context chunks found for document_id '{body.document_id}'.")
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to edit transformation: Source document context could not be retrieved."
-        )
-
     retrieved_context_blocks = []
     sources = []
     seen_sources = set()
 
-    for chunk in retrieved_chunks:
-        chunk_text = (chunk.get("text") or chunk.get("document") or "").strip()
-        if not chunk_text:
-            continue
-        meta = chunk.get("metadata", {})
-        fname = meta.get("filename", fn_name)
-        page_num = meta.get("page", 1)
-        src_key = (fname, page_num, meta.get("chunk_index", 0))
+    if retrieved_chunks:
+        for chunk in retrieved_chunks:
+            chunk_text = (chunk.get("text") or chunk.get("document") or "").strip()
+            if not chunk_text:
+                continue
+            meta = chunk.get("metadata", {})
+            fname = meta.get("filename", fn_name)
+            page_num = meta.get("page", 1)
+            src_key = (fname, page_num, meta.get("chunk_index", 0))
 
-        if src_key not in seen_sources:
-            seen_sources.add(src_key)
-            sources.append({
-                "filename": fname,
-                "page": page_num,
-                "chunk_index": meta.get("chunk_index", 0)
-            })
+            if src_key not in seen_sources:
+                seen_sources.add(src_key)
+                sources.append({
+                    "filename": fname,
+                    "page": page_num,
+                    "chunk_index": meta.get("chunk_index", 0)
+                })
 
-        retrieved_context_blocks.append(f"[Source: {fname} | Page: {page_num}]\n{chunk_text}")
+            retrieved_context_blocks.append(f"[Source: {fname} | Page: {page_num}]\n{chunk_text}")
 
     retrieved_context = "\n\n".join(retrieved_context_blocks).strip()
 
-    if not retrieved_context.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to edit transformation: Source document context is empty."
-        )
+    if not retrieved_context and body.current_output:
+        retrieved_context = str(body.current_output)
 
     # 3. Agent 2 & Output Validator Execution
     res = execute_edit_transformation(

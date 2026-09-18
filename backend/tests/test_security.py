@@ -54,7 +54,7 @@ class TestSecuritySuite(unittest.TestCase):
         """5. User A -> User B document -> Expected 403"""
         # Step A: User B uploads a document
         headers_b = {"Authorization": "Bearer test-user-b"}
-        files_b = {"file": ("user_b_private.pdf", b"Secret Document of User B", "application/pdf")}
+        files_b = {"file": ("user_b_private.pdf", b"%PDF-1.4\nSecret Document of User B", "application/pdf")}
         upload_res = client.post("/api/upload", headers=headers_b, files=files_b)
         self.assertEqual(upload_res.status_code, 200)
         doc_id = upload_res.json()["document_id"]
@@ -77,21 +77,26 @@ class TestSecuritySuite(unittest.TestCase):
         files = {"file": ("malware.exe", b"binary content", "application/x-msdownload")}
         res = client.post("/api/upload", headers=headers, files=files)
         self.assertEqual(res.status_code, 400)
-        self.assertIn("extension", res.json().get("detail", "").lower())
+        self.assertIn("security validation", res.json().get("detail", "").lower())
 
     def test_08_oversized_file_upload(self):
-        """8. Oversized file -> Expected 413"""
+        """8. Oversized file (>300MB) -> Expected 413"""
         headers = {"Authorization": "Bearer test-token-officer"}
-        # Create a file payload > 15MB
-        large_bytes = b"0" * (16 * 1024 * 1024)
-        files = {"file": ("large.pdf", large_bytes, "application/pdf")}
-        res = client.post("/api/upload", headers=headers, files=files)
-        self.assertEqual(res.status_code, 413)
+        # Temporarily lower MAX_FILE_SIZE_BYTES for instant testing without 300MB RAM allocation
+        original_max = security_config.MAX_FILE_SIZE_BYTES
+        try:
+            security_config.MAX_FILE_SIZE_BYTES = 1000
+            files = {"file": ("large.pdf", b"%PDF-1.4\n" + b"0" * 2000, "application/pdf")}
+            res = client.post("/api/upload", headers=headers, files=files)
+            self.assertEqual(res.status_code, 413)
+            self.assertIn("300 MB", res.json().get("detail", ""))
+        finally:
+            security_config.MAX_FILE_SIZE_BYTES = original_max
 
     def test_09_path_traversal_filename(self):
         """9. Path traversal filename -> Expected rejected/safely sanitized"""
         headers = {"Authorization": "Bearer test-token-officer"}
-        files = {"file": ("../../secret_system_file.pdf", b"Valid PDF content", "application/pdf")}
+        files = {"file": ("../../secret_system_file.pdf", b"%PDF-1.4\nValid PDF content", "application/pdf")}
         res = client.post("/api/upload", headers=headers, files=files)
         self.assertEqual(res.status_code, 200)
         filename = res.json()["filename"]
@@ -132,7 +137,7 @@ class TestSecuritySuite(unittest.TestCase):
         """12. MFA-required operation without MFA -> Expected denied (403 MFA_REQUIRED)"""
         # User B (Officer role) has 'share' permission, but share_document requires MFA verification
         headers_b = {"Authorization": "Bearer test-user-b"}
-        files_b = {"file": ("mfa_doc.pdf", b"Content", "application/pdf")}
+        files_b = {"file": ("mfa_doc.pdf", b"%PDF-1.4\nContent", "application/pdf")}
         upload_res = client.post("/api/upload", headers=headers_b, files=files_b)
         doc_id = upload_res.json()["document_id"]
 

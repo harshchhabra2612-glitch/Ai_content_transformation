@@ -11,15 +11,17 @@ export interface PickedFile {
   rawFile?: File;
 }
 
-export const ACCEPT = ".pdf,.docx,.pptx,.xlsx,.txt";
-export const MAX_MB = 25;
+export const ACCEPT = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.odt,.ods,.odp,.txt,.csv,.tsv,.md,.rtf,.json,.xml,.html,.htm,.png,.jpg,.jpeg,.webp,.tiff,.tif,.bmp,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mov,.webm,.mkv,.avi,.zip,.7z,.tar,.tgz";
+export const MAX_MB = 300;
 
 const KIND_FROM_EXT: Record<string, FileKind> = {
-  pdf: "pdf",
-  docx: "docx",
-  pptx: "pptx",
-  xlsx: "xlsx",
-  txt: "txt",
+  pdf: "pdf", doc: "doc", docx: "docx", ppt: "ppt", pptx: "pptx", xls: "xls", xlsx: "xlsx",
+  odt: "odt", ods: "ods", odp: "odp", txt: "txt", csv: "csv", tsv: "tsv", md: "md", rtf: "rtf",
+  json: "json", xml: "xml", html: "html", htm: "htm",
+  png: "png", jpg: "jpg", jpeg: "jpeg", webp: "webp", tiff: "tiff", tif: "tif", bmp: "bmp",
+  mp3: "mp3", wav: "wav", m4a: "m4a", aac: "aac", ogg: "ogg", flac: "flac",
+  mp4: "mp4", mov: "mov", webm: "webm", mkv: "mkv", avi: "avi",
+  zip: "zip", "7z": "7z", tar: "tar", tgz: "tgz", gz: "gz"
 };
 
 export function validateFiles(files: File[]): PickedFile[] {
@@ -28,10 +30,6 @@ export function validateFiles(files: File[]): PickedFile[] {
     const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
     const kind = KIND_FROM_EXT[ext];
     const size = f.size;
-    // size checks
-    if (size > MAX_MB * 1024 * 1024) {
-      // oversize flagged by caller via returned meta? Simpler: caller toasts
-    }
     if (kind && size <= MAX_MB * 1024 * 1024) {
       valid.push({ name: f.name, kind, size, rawFile: f });
     }
@@ -81,10 +79,10 @@ export default function UploadZone({
     }
 
     if (rejectedType.length) {
-      toast.error("Unsupported file type", "Please upload PDF, DOCX, PPTX, XLSX or TXT files.");
+      toast.error("Unsupported file type", "File type could not be verified.");
     }
     if (rejectedSize.length) {
-      toast.error("File is too large", `Maximum file size is ${MAX_MB} MB per file.`);
+      toast.error("File is too large", "File size exceeds the maximum allowed limit of 300 MB.");
     }
     if (valid.length) {
       onFiles(multiple ? valid : valid.slice(0, 1));

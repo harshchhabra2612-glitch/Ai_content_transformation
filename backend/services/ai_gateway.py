@@ -69,21 +69,23 @@ def get_agent1_model() -> str:
     return get_ai_model()
 
 
-def get_openai_client() -> OpenAI:
+def get_openai_client(timeout: float = 120.0) -> OpenAI:
     """
     Instantiates an OpenAI client targeting the internal AI Gateway.
     Credential resolution is strictly isolated to backend environment.
+    Uses reasonable server-side generation timeout (120 seconds).
     """
     api_key = get_ai_gateway_api_key() or "dummy_gateway_key"
     base_url = get_ai_gateway_url()
-    return OpenAI(api_key=api_key, base_url=base_url)
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 def call_ai_gateway(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: Optional[int] = 1000
+    max_tokens: Optional[int] = 1000,
+    timeout: float = 120.0
 ) -> Dict[str, Any]:
     """
     Executes a Chat Completion request against the internal AI Gateway using Qwen 7B.
@@ -96,11 +98,14 @@ def call_ai_gateway(
     target_temp = temperature if temperature is not None else 0.2
     target_max_tokens = max_tokens or 1000
 
-    logger.info(f"[AI GATEWAY] provider=internal_gateway base_url={base_url} model={target_model} status=initiated")
+    logger.info(
+        f"AI_GATEWAY_REQUEST_START provider=internal_gateway base_url={base_url} "
+        f"AI_GATEWAY_MODEL={target_model} max_tokens={target_max_tokens} timeout={timeout}s"
+    )
 
     start_time = time.time()
     try:
-        client = get_openai_client()
+        client = get_openai_client(timeout=timeout)
         kwargs: Dict[str, Any] = {
             "model": target_model,
             "messages": messages,
@@ -110,7 +115,7 @@ def call_ai_gateway(
             kwargs["max_tokens"] = target_max_tokens
 
         response = client.chat.completions.create(**kwargs)
-        latency_ms = int((time.time() - start_time) * 1000)
+        duration_ms = int((time.time() - start_time) * 1000)
         
         content = ""
         if response.choices and len(response.choices) > 0:
@@ -141,8 +146,8 @@ def call_ai_gateway(
         }
 
         logger.info(
-            f"[AI GATEWAY] provider=internal_gateway model={target_model} status=completed "
-            f"response_len={len(content)} usage={usage_info} latency_ms={latency_ms}"
+            f"AI_GATEWAY_RESPONSE_RECEIVED AI_GATEWAY_MODEL={target_model} AI_GATEWAY_STATUS=completed "
+            f"AI_GATEWAY_DURATION_MS={duration_ms} AI_GATEWAY_TOKEN_USAGE={usage_info} response_len={len(content)}"
         )
 
         return {
@@ -152,13 +157,18 @@ def call_ai_gateway(
             "temperature": target_temp,
             "max_tokens": target_max_tokens,
             "usage": usage_info,
-            "latency_ms": latency_ms
+            "latency_ms": duration_ms
         }
 
     except Exception as e:
-        latency_ms = int((time.time() - start_time) * 1000)
+        duration_ms = int((time.time() - start_time) * 1000)
         err_msg = str(e)
-        logger.error(f"[AI GATEWAY ERROR] provider=internal_gateway model={target_model} error={err_msg}")
+        is_timeout = "timeout" in err_msg.lower() or "timed out" in err_msg.lower()
+        if is_timeout:
+            logger.error(f"AI_GATEWAY_TIMEOUT AI_GATEWAY_MODEL={target_model} AI_GATEWAY_DURATION_MS={duration_ms} error={err_msg}")
+        else:
+            logger.error(f"AI_GATEWAY_ERROR AI_GATEWAY_MODEL={target_model} AI_GATEWAY_STATUS=failed AI_GATEWAY_DURATION_MS={duration_ms} error={err_msg}")
+
         return {
             "success": False,
             "error": err_msg,
@@ -170,7 +180,7 @@ def call_ai_gateway(
                 "completion_tokens": 0,
                 "total_tokens": 0
             },
-            "latency_ms": latency_ms
+            "latency_ms": duration_ms
         }
 
 

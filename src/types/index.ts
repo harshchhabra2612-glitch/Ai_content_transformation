@@ -1,6 +1,11 @@
-export type ThemeMode = "light" | "dark" | "system";
-
-export type FileKind = "pdf" | "docx" | "pptx" | "xlsx" | "txt";
+export type FileKind =
+  | "pdf" | "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx"
+  | "odt" | "ods" | "odp" | "txt" | "csv" | "tsv" | "md" | "rtf"
+  | "json" | "xml" | "html" | "htm"
+  | "png" | "jpg" | "jpeg" | "webp" | "tiff" | "tif" | "bmp"
+  | "mp3" | "wav" | "m4a" | "aac" | "ogg" | "flac"
+  | "mp4" | "mov" | "webm" | "mkv" | "avi"
+  | "zip" | "7z" | "tar" | "tgz" | "gz";
 export type FileStatus = "uploading" | "processing" | "ready" | "failed" | "archived";
 
 export interface SharedUser {
